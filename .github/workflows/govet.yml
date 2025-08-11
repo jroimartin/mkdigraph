@@ -1,0 +1,12 @@
+name: go vet
+on: [push, pull_request]
+jobs:
+  govet:
+    name: go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.6'
+      - run: go vet ./...
