@@ -15,12 +15,11 @@
 //	-n n
 //		Number of vertices (default 25).
 //
-//	-edges n
-//		Maximum number of outgoing edges per vertex
-//		(default 5).
+//	-trials n
+//		Number of edge creation trials per vertex (default 5).
 //
 //	-prob p
-//		Probability of creating an edge. p is a float value
+//		Success probability for each trial. p is a float value
 //		between 0 and 1 (default 0.5).
 //
 //	-loops
@@ -49,12 +48,10 @@
 // Each line specifies an edge, represented by two fields separated by
 // a space character. The first field is the label of the tail vertex
 // and the second field is the label of the head vertex. The head
-// vertex is omitted for vertices with no outgoing edges. If the
-// -multiedge flag is provided, the output may contain duplicated
-// two-field entries. However, single-field entries are always unique.
+// vertex is omitted for vertices with no outgoing edges.
 //
-// If -prob=0, the graph may have isolated vertices. If -prob=1, the
-// resulting digraph might have vertices with no outgoing edges,
+// If -prob=0, the graph may have isolated vertices. Even if -prob=1,
+// the resulting digraph might have vertices with no outgoing edges,
 // depending on the -loops and -multiedges flags.
 //
 // If the -words flag is specified, vertex labels are selected from
@@ -69,14 +66,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"iter"
 	"log"
 	"maps"
-	"math/rand/v2"
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
+
+	"github.com/jroimartin/randgraph"
 )
 
 func main() {
@@ -85,11 +81,11 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("mkdigraph: ")
 
-	numVertices := flag.Int("n", 25, "number of vertices")
-	maxEdges := flag.Int("edges", 5, "maximum number of outgoing edges per vertex")
-	edgeProb := flag.Float64("prob", 0.5, "probability of creating an edge")
-	allowLoops := flag.Bool("loops", false, "allow loops")
-	allowMultiEdges := flag.Bool("multiedges", false, "allow multiple edges")
+	vertices := flag.Int("n", 25, "number of vertices")
+	trials := flag.Int("trials", 5, "number of edge creation trials per vertex")
+	prob := flag.Float64("prob", 0.5, "success probability for each trial")
+	loops := flag.Bool("loops", false, "allow loops")
+	multiedges := flag.Bool("multiedges", false, "allow multiple edges")
 	wordsFile := flag.String("words", "", "choose vertex labels from a words file")
 	emitDOT := flag.Bool("dot", false, "emit DOT output")
 	outFile := flag.String("o", "", "output file")
@@ -101,16 +97,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *numVertices < 0 {
-		log.Fatalf("invalid number of vertices: %v", *numVertices)
-	}
-	if *maxEdges < 0 {
-		log.Fatalf("invalid maximum number of outgoing edges: %v", *maxEdges)
-	}
-	if *edgeProb < 0 || *edgeProb > 1 {
-		log.Fatalf("invalid edge probability: %v", *edgeProb)
-	}
-
 	var words []string
 	if *wordsFile != "" {
 		words, err = readWords(*wordsFile)
@@ -119,14 +105,20 @@ func main() {
 		}
 	}
 
-	opts := digraphOpts{
-		NumVertices:     *numVertices,
-		MaxEdges:        *maxEdges,
-		EdgeProb:        *edgeProb,
-		AllowLoops:      *allowLoops,
-		AllowMultiEdges: *allowMultiEdges,
-		Labels:          words,
+	opts := randgraph.BinomialOpts{
+		Vertices:   *vertices,
+		N:          *trials,
+		P:          *prob,
+		Loops:      *loops,
+		Multiedges: *multiedges,
+		Directed:   true,
+		Labels:     words,
 	}
+	b, err := randgraph.NewBinomial(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	r := randgraph.New(b)
 
 	fout := os.Stdout
 	if *outFile != "" {
@@ -134,12 +126,13 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		defer fout.Close()
 	}
 
 	if *emitDOT {
-		printDOT(fout, opts)
+		r.WriteDOT(fout)
 	} else {
-		printText(fout, opts)
+		writeSimple(fout, r.Graph())
 	}
 }
 
@@ -173,100 +166,12 @@ func readWords(name string) ([]string, error) {
 	return slices.Collect(maps.Keys(words)), nil
 }
 
-func printText(w io.Writer, opts digraphOpts) {
-	for tail, heads := range digraph(opts) {
-		if len(heads) == 0 {
-			fmt.Fprintf(w, "%v\n", tail)
+func writeSimple(w io.Writer, ch <-chan randgraph.Edge) {
+	for edge := range ch {
+		if edge.V1 != "" {
+			fmt.Fprintf(w, "%v %v\n", edge.V0, edge.V1)
 		} else {
-			for _, head := range heads {
-				fmt.Fprintf(w, "%v %v\n", tail, head)
-			}
+			fmt.Fprintf(w, "%v\n", edge.V0)
 		}
 	}
-}
-
-func printDOT(w io.Writer, opts digraphOpts) {
-	fmt.Fprintln(w, "digraph {")
-	for tail, heads := range digraph(opts) {
-		if len(heads) == 0 {
-			fmt.Fprintf(w, "  %v\n", tail)
-		} else {
-			for _, head := range heads {
-				fmt.Fprintf(w, "  %v -> %v\n", tail, head)
-			}
-		}
-	}
-	fmt.Fprintln(w, "}")
-}
-
-type digraphOpts struct {
-	NumVertices     int
-	MaxEdges        int
-	EdgeProb        float64
-	AllowLoops      bool
-	AllowMultiEdges bool
-	Labels          []string
-}
-
-// randIntN is set by tests to produce predictable results.
-var randIntN = rand.IntN
-
-func digraph(opts digraphOpts) iter.Seq2[string, []string] {
-	if opts.NumVertices < 0 {
-		panic("invalid number of vertices")
-	}
-	if opts.MaxEdges < 0 {
-		panic("invalid maximum number of outgoing edges")
-	}
-	if opts.EdgeProb < 0 || opts.EdgeProb > 1 {
-		log.Fatalf("invalid edge probability: %v", opts.EdgeProb)
-	}
-
-	return func(yield func(string, []string) bool) {
-		for itail := range opts.NumVertices {
-			tail := label(opts.Labels, itail)
-
-			var start int
-			if opts.AllowLoops {
-				start = 0
-			} else {
-				if itail == opts.NumVertices-1 {
-					// No possible heads.
-					yield(tail, []string{})
-					return
-				}
-				start = itail + 1
-			}
-
-			heads := make([]string, 0)
-			selHeads := make(map[int]struct{})
-			for range opts.MaxEdges {
-				if rand.Float64() < opts.EdgeProb {
-					ihead := start + randIntN(opts.NumVertices-start)
-					if !opts.AllowMultiEdges {
-						if _, found := selHeads[ihead]; found {
-							continue
-						}
-						selHeads[ihead] = struct{}{}
-					}
-					heads = append(heads, label(opts.Labels, ihead))
-				}
-			}
-
-			if !yield(tail, heads) {
-				return
-			}
-		}
-	}
-}
-
-func label(labels []string, n int) string {
-	if len(labels) == 0 {
-		return strconv.Itoa(n)
-	}
-	i := n % len(labels)
-	if n < len(labels) {
-		return labels[i]
-	}
-	return labels[i] + strconv.Itoa(n)
 }

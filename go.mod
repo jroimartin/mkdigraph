@@ -1,3 +1,5 @@
 module github.com/jroimartin/mkdigraph
 
-go 1.24.5
+go 1.25.0
+
+require github.com/jroimartin/randgraph v0.1.0
