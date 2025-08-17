@@ -42,17 +42,19 @@
 // Unless the -dot flag is specified, it prints the graph in the
 // format:
 //
-//	tail [head]
+//	V: id label
+//	...
+//	E: tail head
 //	...
 //
-// Each line specifies an edge, represented by two fields separated by
-// a space character. The first field is the label of the tail vertex
-// and the second field is the label of the head vertex. The head
-// vertex is omitted for vertices with no outgoing edges.
+// Each line specifies either a vertex or an edge. Lines starting with
+// "V:" define vertices, followed by the ID and the label of the
+// vertex. Lines starting with "E:" define edges, followed by the IDs
+// of the tail and head vertices. All fields are separated by a single
+// space.
 //
-// If -prob=0, the graph may have isolated vertices. Even if -prob=1,
-// the resulting digraph might have vertices with no outgoing edges,
-// depending on the -loops and -multiedges flags.
+// Note that even if -prob=1, if -loops=false the resulting digraph
+// will have a vertex with no outgoing edges.
 //
 // If the -words flag is specified, vertex labels are selected from
 // the provided words file. Each label is sanitized by removing any
@@ -71,6 +73,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 
 	"github.com/jroimartin/randgraph"
 )
@@ -105,18 +108,15 @@ func main() {
 		}
 	}
 
-	opts := randgraph.BinomialOpts{
-		Vertices:   *vertices,
-		N:          *trials,
-		P:          *prob,
-		Loops:      *loops,
-		Multiedges: *multiedges,
-		Directed:   true,
-		Labels:     words,
-	}
-	b, err := randgraph.NewBinomial(opts)
+	b, err := randgraph.NewBinomial(*vertices, *trials, *prob)
 	if err != nil {
 		log.Fatal(err)
+	}
+	b.Loops = *loops
+	b.Multiedges = *multiedges
+	b.Directed = true
+	b.VertexLabel = func(id int) any {
+		return label(words, id)
 	}
 	r := randgraph.New(b)
 
@@ -132,7 +132,7 @@ func main() {
 	if *emitDOT {
 		r.WriteDOT(fout)
 	} else {
-		writeSimple(fout, r.Graph())
+		writeSimple(fout, r)
 	}
 }
 
@@ -148,6 +148,7 @@ func readWords(name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 
 	s := bufio.NewScanner(f)
 
@@ -166,12 +167,22 @@ func readWords(name string) ([]string, error) {
 	return slices.Collect(maps.Keys(words)), nil
 }
 
-func writeSimple(w io.Writer, ch <-chan randgraph.Edge) {
-	for edge := range ch {
-		if edge.V1 != "" {
-			fmt.Fprintf(w, "%v %v\n", edge.V0, edge.V1)
-		} else {
-			fmt.Fprintf(w, "%v\n", edge.V0)
-		}
+func writeSimple(w io.Writer, r *randgraph.RandGraph) {
+	for v := range r.Vertices() {
+		fmt.Fprintf(w, "V: %v %v\n", v.ID, v.Label)
 	}
+	for e := range r.Edges() {
+		fmt.Fprintf(w, "E: %v %v\n", e.V0, e.V1)
+	}
+}
+
+func label(labels []string, id int) string {
+	if len(labels) == 0 {
+		return strconv.Itoa(id)
+	}
+	i := id % len(labels)
+	if id < len(labels) {
+		return labels[i]
+	}
+	return labels[i] + strconv.Itoa(id)
 }
